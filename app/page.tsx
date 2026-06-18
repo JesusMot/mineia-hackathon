@@ -17,6 +17,8 @@ import { celoSepolia } from "viem/chains";
 type Screen = "welcome" | "dashboard" | "mine" | "manager" | "log";
 type Resource = "gold" | "emeralds" | "diamonds";
 type AiActionResult = "mined" | "wait";
+type ManagerPlanId = "trial" | "basic" | "premium";
+type InfrastructureId = "cabin" | "storage" | "workshop" | "control";
 type MiniPayPaymentStatus =
   | "idle"
   | "connecting"
@@ -50,21 +52,26 @@ type DecisionLog = {
 };
 
 type ManagerPlan = {
-  id: "trial" | "basic" | "premium";
+  id: ManagerPlanId;
   name: string;
   duration: number;
   label: string;
   locked: boolean;
   accent: string;
+  priceUsdc?: string;
 };
 
 type GameState = {
   gold: number;
   emeralds: number;
   diamonds: number;
+  mineCoins: number;
+  builtUpgrades: InfrastructureId[];
   energy: number;
   mineLevel: number;
   miniPayUnlocked: boolean;
+  miniPayPurchasedPlans: ManagerPlanId[];
+  miniPayLastPurchasedPlan: ManagerPlanId | null;
   miniPayWalletAddress: string | null;
   miniPayTxHash: string | null;
   miniPayUnlockedAt: number | null;
@@ -82,6 +89,11 @@ type GameState = {
 const MAX_ENERGY = 100;
 const TICK_MS = 30_000;
 const STORAGE_KEY = "mineai-game-v1";
+const RESOURCE_TO_MINECOINS: Record<Resource, number> = {
+  gold: 1,
+  emeralds: 5,
+  diamonds: 20
+};
 const MINI_PAY_TREASURY_ADDRESS = process.env.NEXT_PUBLIC_MINEAI_MINIPAY_TREASURY_ADDRESS;
 const MINI_PAY_STABLE_TOKEN_ADDRESS = process.env.NEXT_PUBLIC_MINEAI_MINIPAY_STABLE_TOKEN_ADDRESS;
 const MINI_PAY_STABLE_TOKEN_DECIMALS = Number(
@@ -111,9 +123,13 @@ const initialGame: GameState = {
   gold: 0,
   emeralds: 0,
   diamonds: 0,
+  mineCoins: 0,
+  builtUpgrades: [],
   energy: 100,
   mineLevel: 1,
   miniPayUnlocked: false,
+  miniPayPurchasedPlans: [],
+  miniPayLastPurchasedPlan: null,
   miniPayWalletAddress: null,
   miniPayTxHash: null,
   miniPayUnlockedAt: null,
@@ -143,7 +159,8 @@ const plans: ManagerPlan[] = [
     duration: 4,
     label: "4 hours",
     locked: true,
-    accent: "from-[#123d32] to-[#12231f]"
+    accent: "from-[#123d32] to-[#12231f]",
+    priceUsdc: "0.01"
   },
   {
     id: "premium",
@@ -151,7 +168,40 @@ const plans: ManagerPlan[] = [
     duration: 6,
     label: "6 hours",
     locked: true,
-    accent: "from-[#4a3513] to-[#251d11]"
+    accent: "from-[#4a3513] to-[#251d11]",
+    priceUsdc: "0.03"
+  }
+];
+
+const infrastructureUpgrades: Array<{
+  id: InfrastructureId;
+  name: string;
+  cost: number;
+  description: string;
+}> = [
+  {
+    id: "cabin",
+    name: "Wooden Cabin",
+    cost: 25,
+    description: "A first base for your mining crew."
+  },
+  {
+    id: "storage",
+    name: "Storage House",
+    cost: 75,
+    description: "A safer place to hold extracted resources."
+  },
+  {
+    id: "workshop",
+    name: "Mining Workshop",
+    cost: 150,
+    description: "Tools and benches for deeper mining work."
+  },
+  {
+    id: "control",
+    name: "AI Control Center",
+    cost: 300,
+    description: "A command room for automated mine operations."
   }
 ];
 
@@ -463,13 +513,21 @@ export default function Home() {
   const [now, setNow] = useState(Date.now());
   const [notice, setNotice] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
+  const [isMiniPayDetected, setIsMiniPayDetected] = useState(false);
 
   useEffect(() => {
+    setIsMiniPayDetected(Boolean(window.ethereum?.isMiniPay));
     const stored = window.localStorage.getItem(STORAGE_KEY);
     if (stored) {
       try {
         const parsed = JSON.parse(stored) as GameState;
-        setGame({ ...initialGame, ...parsed, nextEnergyAt: parsed.nextEnergyAt || Date.now() + TICK_MS });
+        setGame({
+          ...initialGame,
+          ...parsed,
+          builtUpgrades: parsed.builtUpgrades ?? [],
+          miniPayPurchasedPlans: parsed.miniPayPurchasedPlans ?? [],
+          nextEnergyAt: parsed.nextEnergyAt || Date.now() + TICK_MS
+        });
       } catch {
         window.localStorage.removeItem(STORAGE_KEY);
       }
@@ -533,7 +591,15 @@ export default function Home() {
 
   const managerActive = Boolean(game.managerPlan && game.managerExpiresAt && game.managerExpiresAt > now);
   const activePlan = plans.find((plan) => plan.id === game.managerPlan);
+  const hasPurchasedPaidPlan = (planId: ManagerPlanId) => {
+    const legacyUnlock = game.miniPayUnlocked && game.miniPayPurchasedPlans.length === 0;
+    return game.miniPayPurchasedPlans.includes(planId) || legacyUnlock;
+  };
   const totalResources = game.gold + game.emeralds * 3 + game.diamonds * 10;
+  const mineCoinValue =
+    game.gold * RESOURCE_TO_MINECOINS.gold +
+    game.emeralds * RESOURCE_TO_MINECOINS.emeralds +
+    game.diamonds * RESOURCE_TO_MINECOINS.diamonds;
   const productionRate = managerActive ? "2.1 / min" : "Manual";
   const energyCountdown = formatCountdown(game.nextEnergyAt - now);
   const aiCountdown = game.nextAiRunAt ? formatCountdown(game.nextAiRunAt - now) : "0:30";
@@ -575,6 +641,42 @@ export default function Home() {
 
   const showNotice = (message: string) => setNotice(message);
 
+  const convertResourcesToMineCoins = () => {
+    if (mineCoinValue <= 0) {
+      showNotice("Mine resources first, then convert them into MineCoins.");
+      return;
+    }
+
+    setGame((previous) => ({
+      ...previous,
+      gold: 0,
+      emeralds: 0,
+      diamonds: 0,
+      mineCoins: previous.mineCoins + mineCoinValue
+    }));
+    showNotice(`Converted resources into ${mineCoinValue} MineCoins.`);
+  };
+
+  const buildInfrastructure = (upgrade: (typeof infrastructureUpgrades)[number]) => {
+    if (game.builtUpgrades.includes(upgrade.id)) {
+      showNotice(`${upgrade.name} is already built.`);
+      return;
+    }
+
+    if (game.mineCoins < upgrade.cost) {
+      showNotice(`You need ${upgrade.cost} MineCoins to build ${upgrade.name}.`);
+      return;
+    }
+
+    setGame((previous) => ({
+      ...previous,
+      mineCoins: previous.mineCoins - upgrade.cost,
+      builtUpgrades: [...previous.builtUpgrades, upgrade.id],
+      mineLevel: Math.max(previous.mineLevel, previous.builtUpgrades.length + 2)
+    }));
+    showNotice(`${upgrade.name} built! Your mine looks stronger.`);
+  };
+
   const mine = (resource: Resource) => {
     const settings: Record<
       Resource,
@@ -598,7 +700,7 @@ export default function Home() {
     showNotice(amount > 0 ? `+${amount} ${config.label} mined!` : "No diamond this time. Keep digging!");
   };
 
-  const unlockWithMiniPay = async () => {
+  const unlockWithMiniPay = async (plan: ManagerPlan) => {
     if (miniPayBusy) return;
 
     try {
@@ -610,7 +712,7 @@ export default function Home() {
 
       const ethereum = window.ethereum;
       if (!ethereum?.isMiniPay) {
-        throw new Error("Open MineAI inside MiniPay to unlock paid AI Managers.");
+        throw new Error("Open MineAI inside MiniPay to buy AI Managers.");
       }
 
       const accounts = await ethereum.request({
@@ -651,6 +753,7 @@ export default function Home() {
         chain: celoSepolia,
         transport: http()
       });
+      const purchaseAmount = plan.priceUsdc ?? MINI_PAY_UNLOCK_AMOUNT;
 
       const hash = await walletClient.sendTransaction({
         account: account as Address,
@@ -661,7 +764,7 @@ export default function Home() {
           functionName: "transfer",
           args: [
             MINI_PAY_TREASURY_ADDRESS as Address,
-            parseUnits(MINI_PAY_UNLOCK_AMOUNT, MINI_PAY_STABLE_TOKEN_DECIMALS)
+            parseUnits(purchaseAmount, MINI_PAY_STABLE_TOKEN_DECIMALS)
           ]
         })
       });
@@ -685,13 +788,15 @@ export default function Home() {
       setGame((previous) => ({
         ...previous,
         miniPayUnlocked: true,
+        miniPayPurchasedPlans: Array.from(new Set([...previous.miniPayPurchasedPlans, plan.id])),
+        miniPayLastPurchasedPlan: plan.id,
         miniPayWalletAddress: account,
         miniPayTxHash: hash,
         miniPayUnlockedAt: Date.now(),
         miniPayPaymentStatus: "confirmed",
         miniPayError: null
       }));
-      showNotice("MiniPay payment confirmed. AI Managers unlocked!");
+      showNotice(`${plan.name} purchased with MiniPay.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "MiniPay unlock failed.";
       setGame((previous) => ({
@@ -704,7 +809,7 @@ export default function Home() {
   };
 
   const activateManager = (plan: ManagerPlan) => {
-    if (plan.locked && !game.miniPayUnlocked) {
+    if (plan.locked && !hasPurchasedPaidPlan(plan.id)) {
       showNotice("Unlock MiniPay to activate this manager.");
       return;
     }
@@ -735,6 +840,8 @@ export default function Home() {
     setGame((previous) => ({
       ...previous,
       miniPayUnlocked: true,
+      miniPayPurchasedPlans: ["basic", "premium"],
+      miniPayLastPurchasedPlan: "premium",
       miniPayUnlockedAt: Date.now(),
       miniPayPaymentStatus: "confirmed",
       miniPayError: null
@@ -789,20 +896,8 @@ export default function Home() {
           <Icon name="pickaxe" className="h-6 w-6" />
           Start Mining
         </button>
-        <button
-          onClick={unlockWithMiniPay}
-          disabled={miniPayBusy}
-          className="flex h-14 w-full items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/[0.04] text-sm font-bold text-white/70 transition hover:bg-white/[0.08]"
-        >
-          <Icon name={game.miniPayUnlocked ? "check" : "shield"} className="h-5 w-5" />
-          {game.miniPayUnlocked
-            ? "MiniPay Connected"
-            : miniPayBusy
-              ? miniPayStatusLabel[game.miniPayPaymentStatus]
-              : "Connect MiniPay"}
-        </button>
         <p className="text-center text-[10px] text-white/25">
-          No wallet required to start mining
+          Buy AI Managers from the manager screen inside MiniPay
         </p>
       </div>
     </main>
@@ -834,6 +929,37 @@ export default function Home() {
           <ResourceCard label="Gold" value={game.gold} tone="gold" symbol="●" />
           <ResourceCard label="Emerald" value={game.emeralds} tone="emerald" symbol="◆" />
           <ResourceCard label="Diamond" value={game.diamonds} tone="diamond" symbol="◇" />
+        </div>
+
+        <div className="glass-card mt-4 rounded-3xl p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-gold/70">
+                MineCoins
+              </p>
+              <p className="mt-1 text-3xl font-black text-white">
+                {game.mineCoins.toLocaleString()}
+              </p>
+              <p className="mt-1 text-[11px] text-white/35">
+                Convert mined resources into building power.
+              </p>
+            </div>
+            <button
+              onClick={convertResourcesToMineCoins}
+              className="rounded-2xl border border-gold/25 bg-gold/[0.08] px-4 py-3 text-xs font-black text-gold transition hover:bg-gold/[0.12]"
+            >
+              Convert +{mineCoinValue}
+            </button>
+          </div>
+          <div className="mt-3 grid grid-cols-3 gap-2 text-center text-[10px] font-bold text-white/35">
+            <span className="rounded-xl bg-white/[0.04] px-2 py-2">Gold = 1</span>
+            <span className="rounded-xl bg-emerald/[0.07] px-2 py-2 text-emerald/80">
+              Emerald = 5
+            </span>
+            <span className="rounded-xl bg-diamond/[0.07] px-2 py-2 text-diamond/80">
+              Diamond = 20
+            </span>
+          </div>
         </div>
 
         {managerActive && (
@@ -903,6 +1029,50 @@ export default function Home() {
             <p className="mt-1 text-[10px] text-white/35">
               {managerActive ? aiStatus : "Activate AI to automate"}
             </p>
+          </div>
+        </div>
+
+        <div className="glass-card mt-4 rounded-3xl p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <p className="text-lg font-black">Infrastructure</p>
+              <p className="text-[11px] text-white/35">
+                Spend MineCoins to build your mining base.
+              </p>
+            </div>
+            <span className="rounded-full border border-gold/20 bg-gold/[0.08] px-3 py-1.5 text-[10px] font-black text-gold">
+              {game.builtUpgrades.length}/4 BUILT
+            </span>
+          </div>
+          <div className="grid gap-2">
+            {infrastructureUpgrades.map((upgrade) => {
+              const built = game.builtUpgrades.includes(upgrade.id);
+              const affordable = game.mineCoins >= upgrade.cost;
+              return (
+                <button
+                  key={upgrade.id}
+                  onClick={() => buildInfrastructure(upgrade)}
+                  disabled={built}
+                  className={`flex items-center justify-between gap-3 rounded-2xl border p-3 text-left transition ${
+                    built
+                      ? "border-emerald/20 bg-emerald/10 text-emerald"
+                      : affordable
+                        ? "border-white/10 bg-white/[0.04] text-white hover:bg-white/[0.07]"
+                        : "border-white/[0.06] bg-black/10 text-white/45"
+                  }`}
+                >
+                  <span>
+                    <span className="block text-sm font-black">{upgrade.name}</span>
+                    <span className="mt-0.5 block text-[10px] text-white/35">
+                      {upgrade.description}
+                    </span>
+                  </span>
+                  <span className="shrink-0 rounded-xl bg-black/20 px-3 py-2 text-[10px] font-black">
+                    {built ? "BUILT" : `${upgrade.cost} MC`}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -1131,6 +1301,12 @@ export default function Home() {
           </div>
           <div className="mt-3 grid gap-2 text-[11px] text-white/45">
             <div className="flex items-center justify-between gap-3">
+              <span>MiniPay app</span>
+              <span className={isMiniPayDetected ? "text-emerald" : "text-gold"}>
+                {isMiniPayDetected ? "Detected" : "Not detected"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
               <span>Wallet</span>
               <span className="font-mono text-white/70">{shorten(game.miniPayWalletAddress)}</span>
             </div>
@@ -1165,6 +1341,11 @@ export default function Home() {
               {game.miniPayError}
             </p>
           )}
+          {!isMiniPayDetected && !game.miniPayUnlocked && (
+            <p className="mt-3 rounded-lg border border-gold/20 bg-black/20 px-3 py-2 text-[10px] font-bold text-gold">
+              Open MineAI inside MiniPay to buy AI Managers.
+            </p>
+          )}
         </div>
 
         <div className="mt-5 flex items-center justify-between">
@@ -1173,17 +1354,21 @@ export default function Home() {
             <p className="text-[11px] text-white/35">One plan can run at a time</p>
           </div>
           <span className={`rounded-full border px-3 py-1.5 text-[10px] font-bold ${
-            game.miniPayUnlocked
+            isMiniPayDetected || game.miniPayUnlocked
               ? "border-emerald/20 bg-emerald/10 text-emerald"
               : "border-white/10 bg-white/5 text-white/35"
           }`}>
-            {game.miniPayUnlocked ? "MINIPAY READY" : "MINIPAY LOCKED"}
+            {game.miniPayUnlocked
+              ? "MINIPAY PAID"
+              : isMiniPayDetected
+                ? "MINIPAY READY"
+                : "OPEN MINIPAY"}
           </span>
         </div>
 
         <div className="mt-3 space-y-3">
           {plans.map((plan, index) => {
-            const locked = plan.locked && !game.miniPayUnlocked;
+            const locked = plan.locked && !hasPurchasedPaidPlan(plan.id);
             const active = game.managerPlan === plan.id && managerActive;
             return (
               <div
@@ -1209,6 +1394,11 @@ export default function Home() {
                       <p className="mt-1 flex items-center gap-1.5 text-xs text-white/45">
                         <Icon name="clock" className="h-3.5 w-3.5" /> Runs for {plan.label}
                       </p>
+                      {plan.priceUsdc && (
+                        <p className="mt-2 inline-flex rounded-lg border border-gold/20 bg-gold/[0.08] px-2.5 py-1 text-[10px] font-black text-gold">
+                          {plan.priceUsdc} USDC
+                        </p>
+                      )}
                     </div>
                   </div>
                   <span className={`rounded-full px-2.5 py-1 text-[9px] font-black ${
@@ -1220,7 +1410,7 @@ export default function Home() {
                 <button
                   onClick={() => {
                     if (locked) {
-                      void unlockWithMiniPay();
+                      void unlockWithMiniPay(plan);
                     } else {
                       activateManager(plan);
                     }
@@ -1245,7 +1435,9 @@ export default function Home() {
                     : locked && miniPayBusy
                       ? miniPayStatusLabel[game.miniPayPaymentStatus]
                       : locked
-                        ? "Unlock with MiniPay"
+                        ? plan.id === "basic"
+                          ? "Buy Basic Manager — 0.01 USDC"
+                          : "Buy Premium Manager — 0.03 USDC"
                         : "Activate manager"}
                 </button>
               </div>
