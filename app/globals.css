@@ -1,0 +1,122 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-sans: "Arial", sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  color: #f7f7f5;
+  background:
+    radial-gradient(circle at 50% -10%, rgba(255, 196, 77, 0.1), transparent 30rem),
+    #05070a;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.app-shell {
+  background:
+    linear-gradient(rgba(9, 13, 18, 0.8), rgba(9, 13, 18, 0.96)),
+    radial-gradient(circle at 10% 22%, rgba(255, 255, 255, 0.035) 0 2px, transparent 3px),
+    radial-gradient(circle at 78% 12%, rgba(255, 255, 255, 0.025) 0 3px, transparent 4px),
+    radial-gradient(circle at 25% 75%, rgba(255, 255, 255, 0.025) 0 2px, transparent 3px),
+    #090d12;
+  background-size: auto, 90px 90px, 130px 130px, 110px 110px, auto;
+}
+
+.glass-card {
+  background: linear-gradient(145deg, rgba(30, 38, 49, 0.94), rgba(15, 20, 27, 0.96));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 14px 30px rgba(0, 0, 0, 0.24);
+}
+
+.metal-button {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(180deg, #ffd976 0%, #ffc44d 45%, #e79c1a 100%);
+  color: #1c1305;
+  border: 1px solid #ffe7a5;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    inset 0 -3px 0 rgba(108, 61, 0, 0.28),
+    0 8px 22px rgba(255, 196, 77, 0.2);
+}
+
+.metal-button::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(115deg, transparent 30%, rgba(255, 255, 255, 0.32), transparent 62%);
+  transform: translateX(-120%);
+  transition: transform 0.5s ease;
+}
+
+.metal-button:hover::after {
+  transform: translateX(120%);
+}
+
+.metal-button:active {
+  transform: translateY(2px) scale(0.99);
+}
+
+.energy-fill {
+  background: linear-gradient(90deg, #f39b38, #ffd65f);
+  box-shadow: 0 0 14px rgba(255, 196, 77, 0.45);
+}
+
+.mine-glow {
+  filter: drop-shadow(0 0 18px rgba(255, 196, 77, 0.18));
+}
+
+.scroll-hide::-webkit-scrollbar {
+  display: none;
+}
+
+.scroll-hide {
+  scrollbar-width: none;
+}
+
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-7px);
+  }
+}
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.8);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+}
+
+.float {
+  animation: float 3.4s ease-in-out infinite;
+}
+
+.pulse-ring {
+  animation: pulse-ring 1.8s ease-out infinite;
+}
