@@ -1,10 +1,29 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import {
+  createPublicClient,
+  createWalletClient,
+  custom,
+  encodeFunctionData,
+  http,
+  isAddress,
+  parseUnits,
+  type Address,
+  type Hash
+} from "viem";
+import { celoSepolia } from "viem/chains";
 
 type Screen = "welcome" | "dashboard" | "mine" | "manager" | "log";
 type Resource = "gold" | "emeralds" | "diamonds";
 type AiActionResult = "mined" | "wait";
+type MiniPayPaymentStatus =
+  | "idle"
+  | "connecting"
+  | "awaiting-signature"
+  | "confirming"
+  | "confirmed"
+  | "failed";
 type IconName =
   | "pickaxe"
   | "bolt"
@@ -46,6 +65,11 @@ type GameState = {
   energy: number;
   mineLevel: number;
   miniPayUnlocked: boolean;
+  miniPayWalletAddress: string | null;
+  miniPayTxHash: string | null;
+  miniPayUnlockedAt: number | null;
+  miniPayPaymentStatus: MiniPayPaymentStatus;
+  miniPayError: string | null;
   managerPlan: ManagerPlan["id"] | null;
   managerExpiresAt: number | null;
   nextAiRunAt: number | null;
@@ -58,6 +82,30 @@ type GameState = {
 const MAX_ENERGY = 100;
 const TICK_MS = 30_000;
 const STORAGE_KEY = "mineai-game-v1";
+const MINI_PAY_TREASURY_ADDRESS = process.env.NEXT_PUBLIC_MINEAI_MINIPAY_TREASURY_ADDRESS;
+const MINI_PAY_STABLE_TOKEN_ADDRESS = process.env.NEXT_PUBLIC_MINEAI_MINIPAY_STABLE_TOKEN_ADDRESS;
+const MINI_PAY_STABLE_TOKEN_DECIMALS = Number(
+  process.env.NEXT_PUBLIC_MINEAI_MINIPAY_STABLE_TOKEN_DECIMALS ?? "6"
+);
+const MINI_PAY_UNLOCK_AMOUNT = process.env.NEXT_PUBLIC_MINEAI_MINIPAY_UNLOCK_AMOUNT ?? "0.01";
+const MINI_PAY_EXPLORER_BASE =
+  process.env.NEXT_PUBLIC_MINEAI_MINIPAY_EXPLORER_BASE_URL ??
+  "https://celo-sepolia.blockscout.com/tx/";
+const ENABLE_SIMULATED_MINIPAY_FALLBACK =
+  process.env.NEXT_PUBLIC_MINEAI_ENABLE_SIMULATED_MINIPAY === "true";
+
+const ERC20_TRANSFER_ABI = [
+  {
+    type: "function",
+    name: "transfer",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "amount", type: "uint256" }
+    ],
+    outputs: [{ type: "bool" }]
+  }
+] as const;
 
 const initialGame: GameState = {
   gold: 0,
@@ -66,6 +114,11 @@ const initialGame: GameState = {
   energy: 100,
   mineLevel: 1,
   miniPayUnlocked: false,
+  miniPayWalletAddress: null,
+  miniPayTxHash: null,
+  miniPayUnlockedAt: null,
+  miniPayPaymentStatus: "idle",
+  miniPayError: null,
   managerPlan: null,
   managerExpiresAt: null,
   nextAiRunAt: null,
@@ -101,6 +154,15 @@ const plans: ManagerPlan[] = [
     accent: "from-[#4a3513] to-[#251d11]"
   }
 ];
+
+declare global {
+  interface Window {
+    ethereum?: {
+      isMiniPay?: boolean;
+      request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+    };
+  }
+}
 
 function Icon({
   name,
@@ -191,6 +253,15 @@ function formatCountdown(ms: number) {
   return minutes > 0
     ? `${minutes}:${seconds.toString().padStart(2, "0")}`
     : `0:${seconds.toString().padStart(2, "0")}`;
+}
+
+function shorten(value: string | null, edge = 6) {
+  if (!value) return "Not connected";
+  return `${value.slice(0, edge)}...${value.slice(-4)}`;
+}
+
+function getMiniPayExplorerUrl(hash: string | null) {
+  return hash ? `${MINI_PAY_EXPLORER_BASE}${hash}` : null;
 }
 
 function randomBetween(min: number, max: number) {
@@ -487,6 +558,19 @@ export default function Home() {
       : aiStatus === "Waiting for energy..."
         ? "clock"
         : "brain";
+  const miniPayExplorerUrl = getMiniPayExplorerUrl(game.miniPayTxHash);
+  const miniPayBusy =
+    game.miniPayPaymentStatus === "connecting" ||
+    game.miniPayPaymentStatus === "awaiting-signature" ||
+    game.miniPayPaymentStatus === "confirming";
+  const miniPayStatusLabel: Record<MiniPayPaymentStatus, string> = {
+    idle: game.miniPayUnlocked ? "Confirmed" : "Not connected",
+    connecting: "Connecting wallet",
+    "awaiting-signature": "Confirm in MiniPay",
+    confirming: "Payment pending",
+    confirmed: "Payment confirmed",
+    failed: "Payment failed"
+  };
   const progress = useMemo(() => Math.min(100, totalResources / 2), [totalResources]);
 
   const showNotice = (message: string) => setNotice(message);
@@ -512,6 +596,111 @@ export default function Home() {
       [resource]: previous[resource] + amount
     }));
     showNotice(amount > 0 ? `+${amount} ${config.label} mined!` : "No diamond this time. Keep digging!");
+  };
+
+  const unlockWithMiniPay = async () => {
+    if (miniPayBusy) return;
+
+    try {
+      setGame((previous) => ({
+        ...previous,
+        miniPayPaymentStatus: "connecting",
+        miniPayError: null
+      }));
+
+      const ethereum = window.ethereum;
+      if (!ethereum?.isMiniPay) {
+        throw new Error("Open MineAI inside MiniPay to unlock paid AI Managers.");
+      }
+
+      const accounts = await ethereum.request({
+        method: "eth_requestAccounts",
+        params: []
+      });
+      const account =
+        Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0] : null;
+
+      if (!account || !isAddress(account)) {
+        throw new Error("MiniPay did not return a valid wallet address.");
+      }
+
+      setGame((previous) => ({
+        ...previous,
+        miniPayWalletAddress: account,
+        miniPayPaymentStatus: "awaiting-signature",
+        miniPayError: null
+      }));
+
+      if (!MINI_PAY_TREASURY_ADDRESS || !isAddress(MINI_PAY_TREASURY_ADDRESS)) {
+        throw new Error("Configure NEXT_PUBLIC_MINEAI_MINIPAY_TREASURY_ADDRESS.");
+      }
+
+      if (!MINI_PAY_STABLE_TOKEN_ADDRESS || !isAddress(MINI_PAY_STABLE_TOKEN_ADDRESS)) {
+        throw new Error("Configure NEXT_PUBLIC_MINEAI_MINIPAY_STABLE_TOKEN_ADDRESS.");
+      }
+
+      if (!Number.isInteger(MINI_PAY_STABLE_TOKEN_DECIMALS) || MINI_PAY_STABLE_TOKEN_DECIMALS < 0) {
+        throw new Error("Configure a valid stable token decimal value.");
+      }
+
+      const walletClient = createWalletClient({
+        chain: celoSepolia,
+        transport: custom(ethereum)
+      });
+      const publicClient = createPublicClient({
+        chain: celoSepolia,
+        transport: http()
+      });
+
+      const hash = await walletClient.sendTransaction({
+        account: account as Address,
+        chain: celoSepolia,
+        to: MINI_PAY_STABLE_TOKEN_ADDRESS as Address,
+        data: encodeFunctionData({
+          abi: ERC20_TRANSFER_ABI,
+          functionName: "transfer",
+          args: [
+            MINI_PAY_TREASURY_ADDRESS as Address,
+            parseUnits(MINI_PAY_UNLOCK_AMOUNT, MINI_PAY_STABLE_TOKEN_DECIMALS)
+          ]
+        })
+      });
+
+      setGame((previous) => ({
+        ...previous,
+        miniPayWalletAddress: account,
+        miniPayTxHash: hash,
+        miniPayPaymentStatus: "confirming",
+        miniPayError: null
+      }));
+
+      const receipt = await publicClient.waitForTransactionReceipt({
+        hash: hash as Hash
+      });
+
+      if (receipt.status !== "success") {
+        throw new Error("MiniPay payment was not confirmed.");
+      }
+
+      setGame((previous) => ({
+        ...previous,
+        miniPayUnlocked: true,
+        miniPayWalletAddress: account,
+        miniPayTxHash: hash,
+        miniPayUnlockedAt: Date.now(),
+        miniPayPaymentStatus: "confirmed",
+        miniPayError: null
+      }));
+      showNotice("MiniPay payment confirmed. AI Managers unlocked!");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "MiniPay unlock failed.";
+      setGame((previous) => ({
+        ...previous,
+        miniPayPaymentStatus: "failed",
+        miniPayError: message
+      }));
+      showNotice(message);
+    }
   };
 
   const activateManager = (plan: ManagerPlan) => {
@@ -542,9 +731,15 @@ export default function Home() {
     showNotice(`${plan.name} is now running.`);
   };
 
-  const unlockMiniPay = () => {
-    setGame((previous) => ({ ...previous, miniPayUnlocked: true }));
-    showNotice("MiniPay connected. AI plans unlocked!");
+  const simulateMiniPayUnlock = () => {
+    setGame((previous) => ({
+      ...previous,
+      miniPayUnlocked: true,
+      miniPayUnlockedAt: Date.now(),
+      miniPayPaymentStatus: "confirmed",
+      miniPayError: null
+    }));
+    showNotice("Emergency fallback unlock enabled.");
   };
 
   const Welcome = () => (
@@ -595,14 +790,16 @@ export default function Home() {
           Start Mining
         </button>
         <button
-          onClick={() => {
-            unlockMiniPay();
-            setScreen("dashboard");
-          }}
+          onClick={unlockWithMiniPay}
+          disabled={miniPayBusy}
           className="flex h-14 w-full items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/[0.04] text-sm font-bold text-white/70 transition hover:bg-white/[0.08]"
         >
           <Icon name={game.miniPayUnlocked ? "check" : "shield"} className="h-5 w-5" />
-          {game.miniPayUnlocked ? "MiniPay Connected" : "Connect MiniPay"}
+          {game.miniPayUnlocked
+            ? "MiniPay Connected"
+            : miniPayBusy
+              ? miniPayStatusLabel[game.miniPayPaymentStatus]
+              : "Connect MiniPay"}
         </button>
         <p className="text-center text-[10px] text-white/25">
           No wallet required to start mining
@@ -910,6 +1107,66 @@ export default function Home() {
           )}
         </div>
 
+        <div className="mt-4 rounded-2xl border border-gold/20 bg-gold/[0.06] p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-gold/80">
+                MiniPay proof
+              </p>
+              <p className="mt-1 text-sm font-black text-white">
+                {miniPayStatusLabel[game.miniPayPaymentStatus]}
+              </p>
+            </div>
+            <span
+              className={`rounded-full border px-2.5 py-1 text-[9px] font-black ${
+                game.miniPayPaymentStatus === "confirmed"
+                  ? "border-emerald/20 bg-emerald/10 text-emerald"
+                  : game.miniPayPaymentStatus === "failed"
+                    ? "border-red-400/20 bg-red-400/10 text-red-200"
+                    : "border-white/10 bg-white/5 text-white/45"
+              }`}
+            >
+              {game.miniPayUnlocked ? "UNLOCKED" : "LOCKED"}
+            </span>
+          </div>
+          <div className="mt-3 grid gap-2 text-[11px] text-white/45">
+            <div className="flex items-center justify-between gap-3">
+              <span>Wallet</span>
+              <span className="font-mono text-white/70">{shorten(game.miniPayWalletAddress)}</span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span>Tx hash</span>
+              <span className="font-mono text-white/70">{shorten(game.miniPayTxHash)}</span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span>Unlocked</span>
+              <span className="text-white/70">
+                {game.miniPayUnlockedAt
+                  ? new Date(game.miniPayUnlockedAt).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit"
+                    })
+                  : "Pending"}
+              </span>
+            </div>
+          </div>
+          {miniPayExplorerUrl && (
+            <a
+              href={miniPayExplorerUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-3 inline-flex rounded-lg border border-diamond/20 bg-diamond/10 px-3 py-2 text-[10px] font-black text-diamond"
+            >
+              View transaction on explorer
+            </a>
+          )}
+          {game.miniPayError && (
+            <p className="mt-3 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-[10px] font-bold text-red-100">
+              {game.miniPayError}
+            </p>
+          )}
+        </div>
+
         <div className="mt-5 flex items-center justify-between">
           <div>
             <h2 className="text-lg font-black">Choose a manager</h2>
@@ -961,31 +1218,48 @@ export default function Home() {
                   </span>
                 </div>
                 <button
-                  onClick={() => activateManager(plan)}
-                  disabled={active}
+                  onClick={() => {
+                    if (locked) {
+                      void unlockWithMiniPay();
+                    } else {
+                      activateManager(plan);
+                    }
+                  }}
+                  disabled={active || (locked && miniPayBusy)}
                   className={`mt-4 flex h-11 w-full items-center justify-center gap-2 rounded-xl text-xs font-black uppercase tracking-wide transition active:scale-[0.99] ${
                     active
                       ? "border border-emerald/20 bg-emerald/10 text-emerald"
+                      : locked && miniPayBusy
+                        ? "border border-gold/20 bg-gold/10 text-gold"
                       : locked
-                        ? "border border-white/10 bg-white/5 text-white/35"
+                        ? "border border-gold/25 bg-gold/[0.08] text-gold"
                         : "bg-white text-black hover:bg-white/90"
                   }`}
                 >
-                  <Icon name={active ? "check" : locked ? "lock" : "sparkles"} className="h-4 w-4" />
-                  {active ? "Manager active" : locked ? "Unlock with MiniPay" : "Activate manager"}
+                  <Icon
+                    name={active ? "check" : locked ? "shield" : "sparkles"}
+                    className="h-4 w-4"
+                  />
+                  {active
+                    ? "Manager active"
+                    : locked && miniPayBusy
+                      ? miniPayStatusLabel[game.miniPayPaymentStatus]
+                      : locked
+                        ? "Unlock with MiniPay"
+                        : "Activate manager"}
                 </button>
               </div>
             );
           })}
         </div>
 
-        {!game.miniPayUnlocked && (
+        {ENABLE_SIMULATED_MINIPAY_FALLBACK && !game.miniPayUnlocked && (
           <button
-            onClick={unlockMiniPay}
-            className="mt-4 flex h-14 w-full items-center justify-center gap-2 rounded-2xl border border-gold/25 bg-gold/[0.08] text-sm font-black text-gold transition hover:bg-gold/[0.12]"
+            onClick={simulateMiniPayUnlock}
+            className="mt-4 flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] text-[10px] font-black uppercase tracking-wide text-white/35 transition hover:bg-white/[0.06]"
           >
-            <Icon name="shield" className="h-5 w-5" />
-            Simulate MiniPay Unlock
+            <Icon name="shield" className="h-4 w-4" />
+            Emergency simulated unlock
           </button>
         )}
       </section>
