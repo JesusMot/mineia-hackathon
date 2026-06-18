@@ -99,7 +99,7 @@ const MINI_PAY_STABLE_TOKEN_ADDRESS = process.env.NEXT_PUBLIC_MINEAI_MINIPAY_STA
 const MINI_PAY_STABLE_TOKEN_DECIMALS = Number(
   process.env.NEXT_PUBLIC_MINEAI_MINIPAY_STABLE_TOKEN_DECIMALS ?? "6"
 );
-const MINI_PAY_UNLOCK_AMOUNT = process.env.NEXT_PUBLIC_MINEAI_MINIPAY_UNLOCK_AMOUNT ?? "0.01";
+const MINI_PAY_UNLOCK_AMOUNT = process.env.NEXT_PUBLIC_MINEAI_MINIPAY_UNLOCK_AMOUNT ?? "0.000001";
 const MINI_PAY_EXPLORER_BASE =
   process.env.NEXT_PUBLIC_MINEAI_MINIPAY_EXPLORER_BASE_URL ??
   "https://celo-sepolia.blockscout.com/tx/";
@@ -160,7 +160,7 @@ const plans: ManagerPlan[] = [
     label: "4 hours",
     locked: true,
     accent: "from-[#123d32] to-[#12231f]",
-    priceUsdc: "0.01"
+    priceUsdc: "0.000001"
   },
   {
     id: "premium",
@@ -169,7 +169,7 @@ const plans: ManagerPlan[] = [
     label: "6 hours",
     locked: true,
     accent: "from-[#4a3513] to-[#251d11]",
-    priceUsdc: "0.03"
+    priceUsdc: "0.000003"
   }
 ];
 
@@ -1436,8 +1436,8 @@ export default function Home() {
                       ? miniPayStatusLabel[game.miniPayPaymentStatus]
                       : locked
                         ? plan.id === "basic"
-                          ? "Buy Basic Manager — 0.01 USDC"
-                          : "Buy Premium Manager — 0.03 USDC"
+                          ? "Buy Basic Manager — 0.000001 USDC"
+                          : "Buy Premium Manager — 0.000003 USDC"
                         : "Activate manager"}
                 </button>
               </div>
