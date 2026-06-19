@@ -8,6 +8,7 @@ import {
   encodeFunctionData,
   http,
   isAddress,
+  formatUnits,
   parseUnits,
   type Address,
   type Hash
@@ -77,6 +78,10 @@ type GameState = {
   miniPayUnlockedAt: number | null;
   miniPayPaymentStatus: MiniPayPaymentStatus;
   miniPayError: string | null;
+  miniPayTokenAddress: string | null;
+  miniPayRequiredAmount: string | null;
+  miniPayDetectedBalance: string | null;
+  miniPayChainId: string | null;
   managerPlan: ManagerPlan["id"] | null;
   managerExpiresAt: number | null;
   nextAiRunAt: number | null;
@@ -109,6 +114,13 @@ const ENABLE_SIMULATED_MINIPAY_FALLBACK =
 const ERC20_TRANSFER_ABI = [
   {
     type: "function",
+    name: "balanceOf",
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ type: "uint256" }]
+  },
+  {
+    type: "function",
     name: "transfer",
     stateMutability: "nonpayable",
     inputs: [
@@ -135,6 +147,10 @@ const initialGame: GameState = {
   miniPayUnlockedAt: null,
   miniPayPaymentStatus: "idle",
   miniPayError: null,
+  miniPayTokenAddress: null,
+  miniPayRequiredAmount: null,
+  miniPayDetectedBalance: null,
+  miniPayChainId: null,
   managerPlan: null,
   managerExpiresAt: null,
   nextAiRunAt: null,
@@ -719,6 +735,10 @@ export default function Home() {
         method: "eth_requestAccounts",
         params: []
       });
+      const currentChainId = await ethereum.request({
+        method: "eth_chainId",
+        params: []
+      });
       const account =
         Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0] : null;
 
@@ -729,6 +749,7 @@ export default function Home() {
       setGame((previous) => ({
         ...previous,
         miniPayWalletAddress: account,
+        miniPayChainId: typeof currentChainId === "string" ? currentChainId : null,
         miniPayPaymentStatus: "awaiting-signature",
         miniPayError: null
       }));
@@ -754,6 +775,30 @@ export default function Home() {
         transport: http()
       });
       const purchaseAmount = plan.priceUsdc ?? MINI_PAY_UNLOCK_AMOUNT;
+      const requiredAmount = parseUnits(purchaseAmount, MINI_PAY_STABLE_TOKEN_DECIMALS);
+      const detectedBalance = await publicClient.readContract({
+        address: MINI_PAY_STABLE_TOKEN_ADDRESS as Address,
+        abi: ERC20_TRANSFER_ABI,
+        functionName: "balanceOf",
+        args: [account as Address]
+      });
+      const formattedBalance = formatUnits(detectedBalance, MINI_PAY_STABLE_TOKEN_DECIMALS);
+
+      setGame((previous) => ({
+        ...previous,
+        miniPayWalletAddress: account,
+        miniPayTokenAddress: MINI_PAY_STABLE_TOKEN_ADDRESS,
+        miniPayRequiredAmount: purchaseAmount,
+        miniPayDetectedBalance: formattedBalance,
+        miniPayChainId: typeof currentChainId === "string" ? currentChainId : null,
+        miniPayPaymentStatus: detectedBalance < requiredAmount ? "failed" : "awaiting-signature",
+        miniPayError:
+          detectedBalance < requiredAmount ? "Insufficient balance for this test token." : null
+      }));
+
+      if (detectedBalance < requiredAmount) {
+        throw new Error("Insufficient balance for this test token.");
+      }
 
       const hash = await walletClient.sendTransaction({
         account: account as Address,
@@ -764,7 +809,7 @@ export default function Home() {
           functionName: "transfer",
           args: [
             MINI_PAY_TREASURY_ADDRESS as Address,
-            parseUnits(purchaseAmount, MINI_PAY_STABLE_TOKEN_DECIMALS)
+            requiredAmount
           ]
         })
       });
@@ -772,6 +817,10 @@ export default function Home() {
       setGame((previous) => ({
         ...previous,
         miniPayWalletAddress: account,
+        miniPayTokenAddress: MINI_PAY_STABLE_TOKEN_ADDRESS,
+        miniPayRequiredAmount: purchaseAmount,
+        miniPayDetectedBalance: formattedBalance,
+        miniPayChainId: typeof currentChainId === "string" ? currentChainId : null,
         miniPayTxHash: hash,
         miniPayPaymentStatus: "confirming",
         miniPayError: null
@@ -1309,6 +1358,28 @@ export default function Home() {
             <div className="flex items-center justify-between gap-3">
               <span>Wallet</span>
               <span className="font-mono text-white/70">{shorten(game.miniPayWalletAddress)}</span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span>Token</span>
+              <span className="font-mono text-white/70">
+                {shorten(game.miniPayTokenAddress ?? MINI_PAY_STABLE_TOKEN_ADDRESS ?? null)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span>Required</span>
+              <span className="font-mono text-white/70">
+                {game.miniPayRequiredAmount ?? MINI_PAY_UNLOCK_AMOUNT} USDC
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span>Detected balance</span>
+              <span className="font-mono text-white/70">
+                {game.miniPayDetectedBalance ? `${game.miniPayDetectedBalance} USDC` : "Not checked"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span>Chain ID</span>
+              <span className="font-mono text-white/70">{game.miniPayChainId ?? "Unknown"}</span>
             </div>
             <div className="flex items-center justify-between gap-3">
               <span>Tx hash</span>
