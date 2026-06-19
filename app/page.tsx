@@ -1355,14 +1355,34 @@ export default function Home() {
                 {isMiniPayDetected ? "Detected" : "Not detected"}
               </span>
             </div>
-            <div className="flex items-center justify-between gap-3">
-              <span>Wallet</span>
-              <span className="font-mono text-white/70">{shorten(game.miniPayWalletAddress)}</span>
+            <div className="grid gap-1">
+              <span>Full wallet address</span>
+              <span className="break-all rounded-lg border border-white/10 bg-black/20 px-2 py-1 font-mono text-white/70">
+                {game.miniPayWalletAddress ?? "Not connected"}
+              </span>
+              <button
+                type="button"
+                disabled={!game.miniPayWalletAddress}
+                onClick={() => {
+                  if (!game.miniPayWalletAddress) return;
+                  void navigator.clipboard
+                    .writeText(game.miniPayWalletAddress)
+                    .then(() => showNotice("MiniPay wallet address copied."))
+                    .catch(() => showNotice("Could not copy address."));
+                }}
+                className="mt-1 rounded-lg border border-diamond/20 bg-diamond/10 px-3 py-2 text-[10px] font-black text-diamond disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/5 disabled:text-white/25"
+              >
+                Copy Address
+              </button>
             </div>
             <div className="flex items-center justify-between gap-3">
-              <span>Token</span>
-              <span className="font-mono text-white/70">
-                {shorten(game.miniPayTokenAddress ?? MINI_PAY_STABLE_TOKEN_ADDRESS ?? null)}
+              <span>Chain ID</span>
+              <span className="font-mono text-white/70">{game.miniPayChainId ?? "Unknown"}</span>
+            </div>
+            <div className="grid gap-1">
+              <span>Token address</span>
+              <span className="break-all rounded-lg border border-white/10 bg-black/20 px-2 py-1 font-mono text-white/70">
+                {game.miniPayTokenAddress ?? MINI_PAY_STABLE_TOKEN_ADDRESS ?? "Not configured"}
               </span>
             </div>
             <div className="flex items-center justify-between gap-3">
@@ -1372,14 +1392,10 @@ export default function Home() {
               </span>
             </div>
             <div className="flex items-center justify-between gap-3">
-              <span>Detected balance</span>
+              <span>Token balance</span>
               <span className="font-mono text-white/70">
                 {game.miniPayDetectedBalance ? `${game.miniPayDetectedBalance} USDC` : "Not checked"}
               </span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span>Chain ID</span>
-              <span className="font-mono text-white/70">{game.miniPayChainId ?? "Unknown"}</span>
             </div>
             <div className="flex items-center justify-between gap-3">
               <span>Tx hash</span>
