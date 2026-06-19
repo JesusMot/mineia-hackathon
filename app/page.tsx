@@ -20,6 +20,7 @@ type Resource = "gold" | "emeralds" | "diamonds";
 type AiActionResult = "mined" | "wait";
 type ManagerPlanId = "trial" | "basic" | "premium";
 type InfrastructureId = "cabin" | "storage" | "workshop" | "control";
+type ActivityProofStatus = "idle" | "pending" | "confirmed" | "failed";
 type MiniPayPaymentStatus =
   | "idle"
   | "connecting"
@@ -84,6 +85,9 @@ type GameState = {
   miniPayChainId: string | null;
   currentPaidManagerPlan: ManagerPlanId | null;
   currentPaidManagerExpiresAt: number | null;
+  activityProofStatus: ActivityProofStatus;
+  activityProofTxHash: string | null;
+  activityProofError: string | null;
   managerPlan: ManagerPlan["id"] | null;
   managerActivatedAt: number | null;
   managerExpiresAt: number | null;
@@ -112,6 +116,8 @@ const MINI_PAY_UNLOCK_AMOUNT = process.env.NEXT_PUBLIC_MINEAI_MINIPAY_UNLOCK_AMO
 const MINI_PAY_EXPLORER_BASE =
   process.env.NEXT_PUBLIC_MINEAI_MINIPAY_EXPLORER_BASE_URL ??
   "https://celo-sepolia.blockscout.com/tx/";
+const MINEAI_ACTIVITY_LOG_CONTRACT_ADDRESS =
+  process.env.NEXT_PUBLIC_MINEAI_ACTIVITY_LOG_CONTRACT_ADDRESS;
 const ENABLE_SIMULATED_MINIPAY_FALLBACK =
   process.env.NEXT_PUBLIC_MINEAI_ENABLE_SIMULATED_MINIPAY === "true";
 
@@ -132,6 +138,54 @@ const ERC20_TRANSFER_ABI = [
       { name: "amount", type: "uint256" }
     ],
     outputs: [{ type: "bool" }]
+  }
+] as const;
+
+const MINEAI_ACTIVITY_LOG_ABI = [
+  {
+    type: "function",
+    name: "recordManualMine",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "resource", type: "uint8" },
+      { name: "amount", type: "uint256" },
+      { name: "energySpent", type: "uint256" }
+    ],
+    outputs: []
+  },
+  {
+    type: "function",
+    name: "recordAIManagerActivation",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "managerType", type: "uint8" },
+      { name: "expiresAt", type: "uint256" }
+    ],
+    outputs: []
+  },
+  {
+    type: "function",
+    name: "recordAIDecision",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "resource", type: "uint8" },
+      { name: "amount", type: "uint256" },
+      { name: "energySpent", type: "uint256" },
+      { name: "confidence", type: "uint256" },
+      { name: "decision", type: "string" },
+      { name: "result", type: "string" }
+    ],
+    outputs: []
+  },
+  {
+    type: "function",
+    name: "recordInfrastructureBuilt",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "infrastructureType", type: "uint8" },
+      { name: "mineLevel", type: "uint256" }
+    ],
+    outputs: []
   }
 ] as const;
 
@@ -158,6 +212,9 @@ function createInitialGame(): GameState {
     miniPayChainId: null,
     currentPaidManagerPlan: null,
     currentPaidManagerExpiresAt: null,
+    activityProofStatus: "idle",
+    activityProofTxHash: null,
+    activityProofError: null,
     managerPlan: null,
     managerActivatedAt: null,
     managerExpiresAt: null,
@@ -338,6 +395,29 @@ function shorten(value: string | null, edge = 6) {
 function getMiniPayExplorerUrl(hash: string | null) {
   return hash ? `${MINI_PAY_EXPLORER_BASE}${hash}` : null;
 }
+
+function getActivityProofExplorerUrl(hash: string | null) {
+  return hash ? `https://celo-sepolia.blockscout.com/tx/${hash}` : null;
+}
+
+const activityResourceId: Record<Resource, number> = {
+  gold: 0,
+  emeralds: 1,
+  diamonds: 2
+};
+
+const activityManagerId: Record<ManagerPlanId, number> = {
+  trial: 0,
+  basic: 1,
+  premium: 2
+};
+
+const activityInfrastructureId: Record<InfrastructureId, number> = {
+  cabin: 0,
+  storage: 1,
+  workshop: 2,
+  control: 3
+};
 
 function randomBetween(min: number, max: number) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -602,6 +682,11 @@ export default function Home() {
   useEffect(() => {
     const interval = window.setInterval(() => {
       const current = Date.now();
+      const activityProofs: Array<{
+        functionName: Parameters<typeof recordActivityProof>[0];
+        args: readonly unknown[];
+      }> = [];
+
       setNow(current);
       setGame((previous) => {
         let next = { ...previous };
@@ -636,10 +721,34 @@ export default function Home() {
           };
         } else if (next.managerPlan && next.nextAiRunAt && current >= next.nextAiRunAt) {
           next = resolveAiAction(next);
+          const latestLog = next.logs[0];
+          const resource = latestLog.decision.includes("Gold")
+            ? "gold"
+            : latestLog.decision.includes("Emerald")
+              ? "emeralds"
+              : latestLog.decision.includes("Diamond")
+                ? "diamonds"
+                : null;
+          const amount = Number(latestLog.result.match(/\+(\d+)/)?.[1] ?? 0);
+          const energySpent = resource === "diamonds" ? 20 : resource === "emeralds" ? 10 : resource === "gold" ? 5 : 0;
+          activityProofs.push({
+            functionName: "recordAIDecision",
+            args: [
+              resource ? activityResourceId[resource] : 3,
+              BigInt(amount),
+              BigInt(energySpent),
+              BigInt(latestLog.confidence ?? 0),
+              latestLog.decision,
+              latestLog.result
+            ]
+          });
           next.nextAiRunAt = current + AI_DECISION_INTERVAL_MS;
         }
 
         return next;
+      });
+      activityProofs.forEach((proof) => {
+        void recordActivityProof(proof.functionName, proof.args);
       });
     }, 1000);
     return () => window.clearInterval(interval);
@@ -705,6 +814,16 @@ export default function Home() {
         ? "clock"
         : "brain";
   const miniPayExplorerUrl = getMiniPayExplorerUrl(game.miniPayTxHash);
+  const activityProofExplorerUrl = getActivityProofExplorerUrl(game.activityProofTxHash);
+  const activityProofEnabled = Boolean(
+    MINEAI_ACTIVITY_LOG_CONTRACT_ADDRESS && isAddress(MINEAI_ACTIVITY_LOG_CONTRACT_ADDRESS)
+  );
+  const activityProofLabel: Record<ActivityProofStatus, string> = {
+    idle: activityProofEnabled ? "Ready" : "Contract not configured",
+    pending: "Saving proof...",
+    confirmed: "Proof saved",
+    failed: "Proof failed"
+  };
   const miniPayBusy =
     game.miniPayPaymentStatus === "connecting" ||
     game.miniPayPaymentStatus === "awaiting-signature" ||
@@ -720,6 +839,96 @@ export default function Home() {
   const progress = useMemo(() => Math.min(100, totalResources / 2), [totalResources]);
 
   const showNotice = (message: string) => setNotice(message);
+
+  const recordActivityProof = async (
+    functionName:
+      | "recordManualMine"
+      | "recordAIManagerActivation"
+      | "recordAIDecision"
+      | "recordInfrastructureBuilt",
+    args: readonly unknown[]
+  ) => {
+    if (!MINEAI_ACTIVITY_LOG_CONTRACT_ADDRESS || !isAddress(MINEAI_ACTIVITY_LOG_CONTRACT_ADDRESS)) {
+      return;
+    }
+
+    const ethereum = window.ethereum;
+    if (!ethereum?.isMiniPay) {
+      setGame((previous) => ({
+        ...previous,
+        activityProofStatus: "failed",
+        activityProofError: "Open inside MiniPay to record on-chain gameplay proof."
+      }));
+      return;
+    }
+
+    try {
+      setGame((previous) => ({
+        ...previous,
+        activityProofStatus: "pending",
+        activityProofError: null
+      }));
+
+      const accounts = await ethereum.request({
+        method: "eth_requestAccounts",
+        params: []
+      });
+      const account =
+        Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0] : null;
+
+      if (!account || !isAddress(account)) {
+        throw new Error("MiniPay did not return a valid wallet address for activity proof.");
+      }
+
+      const walletClient = createWalletClient({
+        chain: celoSepolia,
+        transport: custom(ethereum)
+      });
+      const publicClient = createPublicClient({
+        chain: celoSepolia,
+        transport: http()
+      });
+
+      const hash = await walletClient.writeContract({
+        account: account as Address,
+        address: MINEAI_ACTIVITY_LOG_CONTRACT_ADDRESS as Address,
+        abi: MINEAI_ACTIVITY_LOG_ABI,
+        functionName,
+        args: args as never
+      });
+
+      setGame((previous) => ({
+        ...previous,
+        activityProofStatus: "pending",
+        activityProofTxHash: hash,
+        activityProofError: null
+      }));
+
+      const receipt = await publicClient.waitForTransactionReceipt({
+        hash: hash as Hash
+      });
+
+      if (receipt.status !== "success") {
+        throw new Error("On-chain activity proof was not confirmed.");
+      }
+
+      setGame((previous) => ({
+        ...previous,
+        activityProofStatus: "confirmed",
+        activityProofTxHash: hash,
+        activityProofError: null
+      }));
+      showNotice("On-chain activity proof saved.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "On-chain activity proof failed.";
+      setGame((previous) => ({
+        ...previous,
+        activityProofStatus: "failed",
+        activityProofError: message
+      }));
+      showNotice("Gameplay saved locally. On-chain proof failed.");
+    }
+  };
 
   const convertResourcesToMineCoins = () => {
     if (mineCoinValue <= 0) {
@@ -754,6 +963,10 @@ export default function Home() {
       builtUpgrades: [...previous.builtUpgrades, upgrade.id],
       mineLevel: Math.max(previous.mineLevel, previous.builtUpgrades.length + 2)
     }));
+    void recordActivityProof("recordInfrastructureBuilt", [
+      activityInfrastructureId[upgrade.id],
+      BigInt(Math.max(game.mineLevel, game.builtUpgrades.length + 2))
+    ]);
     showNotice(`${upgrade.name} built! Your mine looks stronger.`);
   };
 
@@ -777,6 +990,11 @@ export default function Home() {
       energy: previous.energy - config.cost,
       [resource]: previous[resource] + amount
     }));
+    void recordActivityProof("recordManualMine", [
+      activityResourceId[resource],
+      BigInt(amount),
+      BigInt(config.cost)
+    ]);
     showNotice(amount > 0 ? `+${amount} ${config.label} mined!` : "No diamond this time. Keep digging!");
   };
 
@@ -938,7 +1156,7 @@ export default function Home() {
       return;
     }
     const managerExpiresAt = plan.locked
-      ? paidPassExpiresAt
+      ? paidPassExpiresAt!
       : current + plan.duration * 60 * 60 * 1000;
 
     setGame((previous) => ({
@@ -961,6 +1179,10 @@ export default function Home() {
         ...previous.logs
       ].slice(0, 30)
     }));
+    void recordActivityProof("recordAIManagerActivation", [
+      activityManagerId[plan.id],
+      BigInt(Math.floor(managerExpiresAt / 1000))
+    ]);
     showNotice(`${plan.name} is now running.`);
   };
 
@@ -1556,6 +1778,63 @@ export default function Home() {
           {!isMiniPayDetected && !game.miniPayUnlocked && (
             <p className="mt-3 rounded-lg border border-gold/20 bg-black/20 px-3 py-2 text-[10px] font-bold text-gold">
               Open MineAI inside MiniPay to buy AI Managers.
+            </p>
+          )}
+        </div>
+
+        <div className="mt-4 rounded-2xl border border-diamond/20 bg-diamond/[0.06] p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-diamond/80">
+                On-chain gameplay proof
+              </p>
+              <p className="mt-1 text-sm font-black text-white">
+                {activityProofLabel[game.activityProofStatus]}
+              </p>
+            </div>
+            <span
+              className={`rounded-full border px-2.5 py-1 text-[9px] font-black ${
+                game.activityProofStatus === "confirmed"
+                  ? "border-emerald/20 bg-emerald/10 text-emerald"
+                  : game.activityProofStatus === "failed"
+                    ? "border-red-400/20 bg-red-400/10 text-red-100"
+                    : activityProofEnabled
+                      ? "border-diamond/20 bg-diamond/10 text-diamond"
+                      : "border-white/10 bg-white/5 text-white/35"
+              }`}
+            >
+              {activityProofEnabled ? "CELO SEPOLIA" : "OFF"}
+            </span>
+          </div>
+          <div className="mt-3 grid gap-2 text-[11px] text-white/45">
+            <div className="flex items-center justify-between gap-3">
+              <span>Contract</span>
+              <span className="font-mono text-white/70">
+                {MINEAI_ACTIVITY_LOG_CONTRACT_ADDRESS
+                  ? shorten(MINEAI_ACTIVITY_LOG_CONTRACT_ADDRESS)
+                  : "Not configured"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span>Latest proof tx</span>
+              <span className="font-mono text-white/70">
+                {game.activityProofTxHash ? shorten(game.activityProofTxHash) : "Not recorded"}
+              </span>
+            </div>
+          </div>
+          {activityProofExplorerUrl && (
+            <a
+              href={activityProofExplorerUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-3 inline-flex rounded-lg border border-diamond/20 bg-diamond/10 px-3 py-2 text-[10px] font-black text-diamond"
+            >
+              View Gameplay Proof
+            </a>
+          )}
+          {game.activityProofError && (
+            <p className="mt-3 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-[10px] font-bold text-red-100">
+              {game.activityProofError}
             </p>
           )}
         </div>
