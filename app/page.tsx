@@ -1396,11 +1396,13 @@ export default function Home() {
                 {isMiniPayDetected ? "Detected" : "Not detected"}
               </span>
             </div>
-            <div className="grid gap-1">
-              <span>Full wallet address</span>
-              <span className="break-all rounded-lg border border-white/10 bg-black/20 px-2 py-1 font-mono text-white/70">
-                {game.miniPayWalletAddress ?? "Not connected"}
-              </span>
+            <div className="grid gap-2 rounded-lg border border-white/10 bg-black/20 p-2">
+              <div className="flex items-center justify-between gap-3">
+                <span>Wallet</span>
+                <span className="font-mono text-white/70">
+                  {shorten(game.miniPayWalletAddress)}
+                </span>
+              </div>
               <button
                 type="button"
                 disabled={!game.miniPayWalletAddress}
@@ -1411,9 +1413,9 @@ export default function Home() {
                     .then(() => showNotice("MiniPay wallet address copied."))
                     .catch(() => showNotice("Could not copy address."));
                 }}
-                className="mt-1 rounded-lg border border-diamond/20 bg-diamond/10 px-3 py-2 text-[10px] font-black text-diamond disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/5 disabled:text-white/25"
+                className="rounded-lg border border-diamond/20 bg-diamond/10 px-3 py-2 text-[10px] font-black text-diamond disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/5 disabled:text-white/25"
               >
-                Copy Address
+                Copy Wallet
               </button>
             </div>
             <div className="flex items-center justify-between gap-3">
@@ -1438,9 +1440,27 @@ export default function Home() {
                 {game.miniPayDetectedBalance ? `${game.miniPayDetectedBalance} USDC` : "Not checked"}
               </span>
             </div>
-            <div className="flex items-center justify-between gap-3">
-              <span>Tx hash</span>
-              <span className="font-mono text-white/70">{shorten(game.miniPayTxHash)}</span>
+            <div className="grid gap-2 rounded-lg border border-white/10 bg-black/20 p-2">
+              <div className="flex items-center justify-between gap-3">
+                <span>Tx hash</span>
+                <span className="font-mono text-white/70">
+                  {game.miniPayTxHash ? shorten(game.miniPayTxHash) : "Not confirmed"}
+                </span>
+              </div>
+              <button
+                type="button"
+                disabled={!game.miniPayTxHash}
+                onClick={() => {
+                  if (!game.miniPayTxHash) return;
+                  void navigator.clipboard
+                    .writeText(game.miniPayTxHash)
+                    .then(() => showNotice("MiniPay transaction hash copied."))
+                    .catch(() => showNotice("Could not copy transaction hash."));
+                }}
+                className="rounded-lg border border-diamond/20 bg-diamond/10 px-3 py-2 text-[10px] font-black text-diamond disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/5 disabled:text-white/25"
+              >
+                Copy Tx Hash
+              </button>
             </div>
             <div className="flex items-center justify-between gap-3">
               <span>Unlocked</span>
@@ -1461,7 +1481,7 @@ export default function Home() {
               rel="noreferrer"
               className="mt-3 inline-flex rounded-lg border border-diamond/20 bg-diamond/10 px-3 py-2 text-[10px] font-black text-diamond"
             >
-              View transaction on explorer
+              View Transaction
             </a>
           )}
           {game.miniPayError && (
