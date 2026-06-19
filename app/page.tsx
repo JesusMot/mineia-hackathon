@@ -118,6 +118,7 @@ const MINI_PAY_EXPLORER_BASE =
   "https://celo-sepolia.blockscout.com/tx/";
 const MINEAI_ACTIVITY_LOG_CONTRACT_ADDRESS =
   process.env.NEXT_PUBLIC_MINEAI_ACTIVITY_LOG_CONTRACT_ADDRESS;
+const ACTIVITY_LOG_GAS_LIMIT = BigInt(160000);
 const ENABLE_SIMULATED_MINIPAY_FALLBACK =
   process.env.NEXT_PUBLIC_MINEAI_ENABLE_SIMULATED_MINIPAY === "true";
 
@@ -894,7 +895,8 @@ export default function Home() {
         address: MINEAI_ACTIVITY_LOG_CONTRACT_ADDRESS as Address,
         abi: MINEAI_ACTIVITY_LOG_ABI,
         functionName,
-        args: args as never
+        args: args as never,
+        gas: ACTIVITY_LOG_GAS_LIMIT
       });
 
       setGame((previous) => ({
