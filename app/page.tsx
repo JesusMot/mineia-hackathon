@@ -82,6 +82,8 @@ type GameState = {
   miniPayRequiredAmount: string | null;
   miniPayDetectedBalance: string | null;
   miniPayChainId: string | null;
+  currentPaidManagerPlan: ManagerPlanId | null;
+  currentPaidManagerExpiresAt: number | null;
   managerPlan: ManagerPlan["id"] | null;
   managerActivatedAt: number | null;
   managerExpiresAt: number | null;
@@ -153,6 +155,8 @@ const initialGame: GameState = {
   miniPayRequiredAmount: null,
   miniPayDetectedBalance: null,
   miniPayChainId: null,
+  currentPaidManagerPlan: null,
+  currentPaidManagerExpiresAt: null,
   managerPlan: null,
   managerActivatedAt: null,
   managerExpiresAt: null,
@@ -541,14 +545,32 @@ export default function Home() {
       try {
         const parsed = JSON.parse(stored) as GameState;
         const current = Date.now();
+        const storedPlan = plans.find((plan) => plan.id === parsed.managerPlan);
+        const legacyPaidSession =
+          parsed.managerPlan && storedPlan?.locked && parsed.managerExpiresAt
+            ? parsed.managerExpiresAt
+            : null;
+        const paidPlan = parsed.currentPaidManagerPlan ?? (legacyPaidSession ? parsed.managerPlan : null);
+        const paidExpiresAt = parsed.currentPaidManagerExpiresAt ?? legacyPaidSession;
+        const hasActivePaidAccess = Boolean(
+          paidPlan &&
+            paidExpiresAt &&
+            paidExpiresAt > current &&
+            paidPlan === parsed.managerPlan
+        );
         const hasActiveStoredManager = Boolean(
-          parsed.managerPlan && parsed.managerExpiresAt && parsed.managerExpiresAt > current
+          parsed.managerPlan &&
+            parsed.managerExpiresAt &&
+            parsed.managerExpiresAt > current &&
+            (!storedPlan?.locked || hasActivePaidAccess)
         );
         setGame({
           ...initialGame,
           ...parsed,
           builtUpgrades: parsed.builtUpgrades ?? [],
           miniPayPurchasedPlans: parsed.miniPayPurchasedPlans ?? [],
+          currentPaidManagerPlan: paidPlan,
+          currentPaidManagerExpiresAt: paidExpiresAt,
           managerPlan: hasActiveStoredManager ? parsed.managerPlan : null,
           managerActivatedAt: hasActiveStoredManager ? (parsed.managerActivatedAt ?? current) : null,
           managerExpiresAt: hasActiveStoredManager ? parsed.managerExpiresAt : null,
@@ -629,10 +651,18 @@ export default function Home() {
 
   const managerActive = Boolean(game.managerPlan && game.managerExpiresAt && game.managerExpiresAt > now);
   const activePlan = plans.find((plan) => plan.id === game.managerPlan);
-  const hasPurchasedPaidPlan = (planId: ManagerPlanId) => {
-    const legacyUnlock = game.miniPayUnlocked && game.miniPayPurchasedPlans.length === 0;
-    return game.miniPayPurchasedPlans.includes(planId) || legacyUnlock;
-  };
+  const hasActivePaidManagerPass = (planId: ManagerPlanId) =>
+    Boolean(
+      game.currentPaidManagerPlan === planId &&
+        game.currentPaidManagerExpiresAt &&
+        game.currentPaidManagerExpiresAt > now
+    );
+  const hasExpiredPaidManagerPass = (planId: ManagerPlanId) =>
+    Boolean(
+      game.currentPaidManagerPlan === planId &&
+        game.currentPaidManagerExpiresAt &&
+        game.currentPaidManagerExpiresAt <= now
+    );
   const totalResources = game.gold + game.emeralds * 3 + game.diamonds * 10;
   const mineCoinValue =
     game.gold * RESOURCE_TO_MINECOINS.gold +
@@ -866,6 +896,9 @@ export default function Home() {
         throw new Error("MiniPay payment was not confirmed.");
       }
 
+      const purchasedAt = Date.now();
+      const paidManagerExpiresAt = purchasedAt + plan.duration * 60 * 60 * 1000;
+
       setGame((previous) => ({
         ...previous,
         miniPayUnlocked: true,
@@ -873,11 +906,13 @@ export default function Home() {
         miniPayLastPurchasedPlan: plan.id,
         miniPayWalletAddress: account,
         miniPayTxHash: hash,
-        miniPayUnlockedAt: Date.now(),
+        miniPayUnlockedAt: purchasedAt,
         miniPayPaymentStatus: "confirmed",
+        currentPaidManagerPlan: plan.id,
+        currentPaidManagerExpiresAt: paidManagerExpiresAt,
         miniPayError: null
       }));
-      showNotice(`${plan.name} purchased with MiniPay.`);
+      showNotice(`${plan.name} purchased. Activate before it expires.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "MiniPay unlock failed.";
       setGame((previous) => ({
@@ -890,16 +925,25 @@ export default function Home() {
   };
 
   const activateManager = (plan: ManagerPlan) => {
-    if (plan.locked && !hasPurchasedPaidPlan(plan.id)) {
-      showNotice("Unlock MiniPay to activate this manager.");
+    const current = Date.now();
+    const paidPassExpiresAt =
+      plan.locked && game.currentPaidManagerPlan === plan.id
+        ? game.currentPaidManagerExpiresAt
+        : null;
+
+    if (plan.locked && (!paidPassExpiresAt || paidPassExpiresAt <= current)) {
+      showNotice("Buy again to activate this AI Manager.");
       return;
     }
-    const current = Date.now();
+    const managerExpiresAt = plan.locked
+      ? paidPassExpiresAt
+      : current + plan.duration * 60 * 60 * 1000;
+
     setGame((previous) => ({
       ...previous,
       managerPlan: plan.id,
       managerActivatedAt: current,
-      managerExpiresAt: current + plan.duration * 60 * 60 * 1000,
+      managerExpiresAt,
       nextAiRunAt: current + AI_DECISION_INTERVAL_MS,
       lastAiActionAt: null,
       lastAiActionResult: null,
@@ -919,16 +963,29 @@ export default function Home() {
   };
 
   const simulateMiniPayUnlock = () => {
+    const current = Date.now();
+    const premiumPlan = plans.find((plan) => plan.id === "premium");
     setGame((previous) => ({
       ...previous,
       miniPayUnlocked: true,
       miniPayPurchasedPlans: ["basic", "premium"],
       miniPayLastPurchasedPlan: "premium",
-      miniPayUnlockedAt: Date.now(),
+      miniPayUnlockedAt: current,
       miniPayPaymentStatus: "confirmed",
+      currentPaidManagerPlan: "premium",
+      currentPaidManagerExpiresAt: current + (premiumPlan?.duration ?? 6) * 60 * 60 * 1000,
       miniPayError: null
     }));
     showNotice("Emergency fallback unlock enabled.");
+  };
+
+  const resetDemo = () => {
+    const confirmed = window.confirm(
+      "Reset MineAI demo state? This clears local game progress only. Blockchain transactions are not changed."
+    );
+    if (!confirmed) return;
+    window.localStorage.removeItem(STORAGE_KEY);
+    window.location.reload();
   };
 
   const Welcome = () => (
@@ -1516,8 +1573,21 @@ export default function Home() {
 
         <div className="mt-3 space-y-3">
           {plans.map((plan, index) => {
-            const locked = plan.locked && !hasPurchasedPaidPlan(plan.id);
+            const paidPassActive = plan.locked && hasActivePaidManagerPass(plan.id);
+            const paidPassExpired = plan.locked && hasExpiredPaidManagerPass(plan.id);
+            const paidHistoryExists = plan.locked && game.miniPayPurchasedPlans.includes(plan.id);
+            const locked = plan.locked && !paidPassActive;
             const active = game.managerPlan === plan.id && managerActive;
+            const shouldBuyAgain = locked && (paidPassExpired || paidHistoryExists);
+            const statusLabel = active || paidPassActive
+              ? "Active"
+              : paidPassExpired
+                ? "Expired"
+                : shouldBuyAgain
+                  ? "Buy Again"
+                  : plan.id === "trial"
+                    ? "FREE"
+                    : "MINIPAY";
             return (
               <div
                 key={plan.id}
@@ -1547,12 +1617,25 @@ export default function Home() {
                           {plan.priceUsdc} USDC
                         </p>
                       )}
+                      {shouldBuyAgain && (
+                        <p className="mt-2 text-[10px] font-bold text-gold">
+                          Buy Again required after expiration.
+                        </p>
+                      )}
                     </div>
                   </div>
                   <span className={`rounded-full px-2.5 py-1 text-[9px] font-black ${
-                    plan.id === "trial" ? "bg-white/10 text-white/60" : "bg-black/20 text-white/45"
+                    active || paidPassActive
+                      ? "bg-emerald/10 text-emerald"
+                      : paidPassExpired
+                        ? "bg-red-400/10 text-red-100"
+                        : shouldBuyAgain
+                          ? "bg-gold/10 text-gold"
+                          : plan.id === "trial"
+                            ? "bg-white/10 text-white/60"
+                            : "bg-black/20 text-white/45"
                   }`}>
-                    {plan.id === "trial" ? "FREE" : "MINIPAY"}
+                    {statusLabel}
                   </span>
                 </div>
                 <button
@@ -1602,6 +1685,13 @@ export default function Home() {
             Emergency simulated unlock
           </button>
         )}
+
+        <button
+          onClick={resetDemo}
+          className="mt-4 flex h-9 w-full items-center justify-center rounded-xl border border-red-400/15 bg-red-400/[0.04] text-[10px] font-black uppercase tracking-wide text-red-100/60 transition hover:bg-red-400/[0.08]"
+        >
+          Reset Demo
+        </button>
       </section>
     </main>
   );
