@@ -135,37 +135,39 @@ const ERC20_TRANSFER_ABI = [
   }
 ] as const;
 
-const initialGame: GameState = {
-  gold: 0,
-  emeralds: 0,
-  diamonds: 0,
-  mineCoins: 0,
-  builtUpgrades: [],
-  energy: 100,
-  mineLevel: 1,
-  miniPayUnlocked: false,
-  miniPayPurchasedPlans: [],
-  miniPayLastPurchasedPlan: null,
-  miniPayWalletAddress: null,
-  miniPayTxHash: null,
-  miniPayUnlockedAt: null,
-  miniPayPaymentStatus: "idle",
-  miniPayError: null,
-  miniPayTokenAddress: null,
-  miniPayRequiredAmount: null,
-  miniPayDetectedBalance: null,
-  miniPayChainId: null,
-  currentPaidManagerPlan: null,
-  currentPaidManagerExpiresAt: null,
-  managerPlan: null,
-  managerActivatedAt: null,
-  managerExpiresAt: null,
-  nextAiRunAt: null,
-  lastAiActionAt: null,
-  lastAiActionResult: null,
-  nextEnergyAt: Date.now() + ENERGY_REGEN_INTERVAL_MS,
-  logs: []
-};
+function createInitialGame(): GameState {
+  return {
+    gold: 0,
+    emeralds: 0,
+    diamonds: 0,
+    mineCoins: 0,
+    builtUpgrades: [],
+    energy: 100,
+    mineLevel: 1,
+    miniPayUnlocked: false,
+    miniPayPurchasedPlans: [],
+    miniPayLastPurchasedPlan: null,
+    miniPayWalletAddress: null,
+    miniPayTxHash: null,
+    miniPayUnlockedAt: null,
+    miniPayPaymentStatus: "idle",
+    miniPayError: null,
+    miniPayTokenAddress: null,
+    miniPayRequiredAmount: null,
+    miniPayDetectedBalance: null,
+    miniPayChainId: null,
+    currentPaidManagerPlan: null,
+    currentPaidManagerExpiresAt: null,
+    managerPlan: null,
+    managerActivatedAt: null,
+    managerExpiresAt: null,
+    nextAiRunAt: null,
+    lastAiActionAt: null,
+    lastAiActionResult: null,
+    nextEnergyAt: Date.now() + ENERGY_REGEN_INTERVAL_MS,
+    logs: []
+  };
+}
 
 const plans: ManagerPlan[] = [
   {
@@ -532,7 +534,7 @@ function ResourceCard({
 
 export default function Home() {
   const [screen, setScreen] = useState<Screen>("welcome");
-  const [game, setGame] = useState<GameState>(initialGame);
+  const [game, setGame] = useState<GameState>(() => createInitialGame());
   const [now, setNow] = useState(Date.now());
   const [notice, setNotice] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
@@ -565,7 +567,7 @@ export default function Home() {
             (!storedPlan?.locked || hasActivePaidAccess)
         );
         setGame({
-          ...initialGame,
+          ...createInitialGame(),
           ...parsed,
           builtUpgrades: parsed.builtUpgrades ?? [],
           miniPayPurchasedPlans: parsed.miniPayPurchasedPlans ?? [],
@@ -984,7 +986,12 @@ export default function Home() {
       "Reset MineAI demo state? This clears local game progress only. Blockchain transactions are not changed."
     );
     if (!confirmed) return;
-    window.localStorage.removeItem(STORAGE_KEY);
+    Object.keys(window.localStorage)
+      .filter((key) => key === STORAGE_KEY || key.startsWith("mineai-"))
+      .forEach((key) => window.localStorage.removeItem(key));
+    setScreen("welcome");
+    setNotice(null);
+    setGame(createInitialGame());
     window.location.reload();
   };
 
