@@ -83,6 +83,7 @@ type GameState = {
   miniPayDetectedBalance: string | null;
   miniPayChainId: string | null;
   managerPlan: ManagerPlan["id"] | null;
+  managerActivatedAt: number | null;
   managerExpiresAt: number | null;
   nextAiRunAt: number | null;
   lastAiActionAt: number | null;
@@ -92,7 +93,8 @@ type GameState = {
 };
 
 const MAX_ENERGY = 100;
-const TICK_MS = 30_000;
+const AI_DECISION_INTERVAL_MS = 8_000;
+const ENERGY_REGEN_INTERVAL_MS = 5_000;
 const STORAGE_KEY = "mineai-game-v1";
 const RESOURCE_TO_MINECOINS: Record<Resource, number> = {
   gold: 1,
@@ -152,11 +154,12 @@ const initialGame: GameState = {
   miniPayDetectedBalance: null,
   miniPayChainId: null,
   managerPlan: null,
+  managerActivatedAt: null,
   managerExpiresAt: null,
   nextAiRunAt: null,
   lastAiActionAt: null,
   lastAiActionResult: null,
-  nextEnergyAt: Date.now() + TICK_MS,
+  nextEnergyAt: Date.now() + ENERGY_REGEN_INTERVAL_MS,
   logs: []
 };
 
@@ -537,13 +540,28 @@ export default function Home() {
     if (stored) {
       try {
         const parsed = JSON.parse(stored) as GameState;
+        const current = Date.now();
+        const hasActiveStoredManager = Boolean(
+          parsed.managerPlan && parsed.managerExpiresAt && parsed.managerExpiresAt > current
+        );
         setGame({
           ...initialGame,
           ...parsed,
           builtUpgrades: parsed.builtUpgrades ?? [],
           miniPayPurchasedPlans: parsed.miniPayPurchasedPlans ?? [],
-          nextEnergyAt: parsed.nextEnergyAt || Date.now() + TICK_MS
+          managerPlan: hasActiveStoredManager ? parsed.managerPlan : null,
+          managerActivatedAt: hasActiveStoredManager ? (parsed.managerActivatedAt ?? current) : null,
+          managerExpiresAt: hasActiveStoredManager ? parsed.managerExpiresAt : null,
+          nextAiRunAt: hasActiveStoredManager
+            ? (parsed.nextAiRunAt ?? current + AI_DECISION_INTERVAL_MS)
+            : null,
+          lastAiActionAt: hasActiveStoredManager ? (parsed.lastAiActionAt ?? null) : null,
+          lastAiActionResult: hasActiveStoredManager ? (parsed.lastAiActionResult ?? null) : null,
+          nextEnergyAt: parsed.nextEnergyAt || current + ENERGY_REGEN_INTERVAL_MS
         });
+        if (hasActiveStoredManager) {
+          setNotice("AI Manager session restored");
+        }
       } catch {
         window.localStorage.removeItem(STORAGE_KEY);
       }
@@ -565,9 +583,12 @@ export default function Home() {
         let next = { ...previous };
 
         if (current >= next.nextEnergyAt) {
-          const elapsedTicks = Math.max(1, Math.floor((current - next.nextEnergyAt) / TICK_MS) + 1);
+          const elapsedTicks = Math.max(
+            1,
+            Math.floor((current - next.nextEnergyAt) / ENERGY_REGEN_INTERVAL_MS) + 1
+          );
           next.energy = Math.min(MAX_ENERGY, next.energy + elapsedTicks * 10);
-          next.nextEnergyAt += elapsedTicks * TICK_MS;
+          next.nextEnergyAt += elapsedTicks * ENERGY_REGEN_INTERVAL_MS;
         }
 
         if (next.managerExpiresAt && current >= next.managerExpiresAt) {
@@ -582,6 +603,7 @@ export default function Home() {
           next = {
             ...next,
             managerPlan: null,
+            managerActivatedAt: null,
             managerExpiresAt: null,
             nextAiRunAt: null,
             lastAiActionAt: null,
@@ -590,7 +612,7 @@ export default function Home() {
           };
         } else if (next.managerPlan && next.nextAiRunAt && current >= next.nextAiRunAt) {
           next = resolveAiAction(next);
-          next.nextAiRunAt = current + TICK_MS;
+          next.nextAiRunAt = current + AI_DECISION_INTERVAL_MS;
         }
 
         return next;
@@ -618,7 +640,17 @@ export default function Home() {
     game.diamonds * RESOURCE_TO_MINECOINS.diamonds;
   const productionRate = managerActive ? "2.1 / min" : "Manual";
   const energyCountdown = formatCountdown(game.nextEnergyAt - now);
-  const aiCountdown = game.nextAiRunAt ? formatCountdown(game.nextAiRunAt - now) : "0:30";
+  const aiCountdown = game.nextAiRunAt ? formatCountdown(game.nextAiRunAt - now) : "0:08";
+  const managerExpiresInMinutes =
+    managerActive && game.managerExpiresAt
+      ? Math.max(1, Math.ceil((game.managerExpiresAt - now) / 60_000))
+      : null;
+  const managerSessionStatus =
+    managerActive && managerExpiresInMinutes
+      ? `AI Manager active — expires in ${managerExpiresInMinutes} minute${
+          managerExpiresInMinutes === 1 ? "" : "s"
+        }`
+      : null;
   const aiStatus = !managerActive
     ? "AI offline"
     : game.energy < 5
@@ -866,8 +898,9 @@ export default function Home() {
     setGame((previous) => ({
       ...previous,
       managerPlan: plan.id,
+      managerActivatedAt: current,
       managerExpiresAt: current + plan.duration * 60 * 60 * 1000,
-      nextAiRunAt: current + TICK_MS,
+      nextAiRunAt: current + AI_DECISION_INTERVAL_MS,
       lastAiActionAt: null,
       lastAiActionResult: null,
       logs: [
@@ -1026,6 +1059,9 @@ export default function Home() {
                   Live AI status
                 </p>
                 <p className="mt-0.5 text-sm font-black">{aiStatus}</p>
+                {managerSessionStatus && (
+                  <p className="mt-1 text-[10px] font-bold opacity-70">{managerSessionStatus}</p>
+                )}
               </div>
             </div>
             <div className="text-right">
@@ -1319,6 +1355,11 @@ export default function Home() {
                     {activePlan?.name}
                   </span>
                   <span className="block">{aiStatus}</span>
+                  {managerSessionStatus && (
+                    <span className="mt-0.5 block text-[9px] font-bold opacity-65">
+                      {managerSessionStatus}
+                    </span>
+                  )}
                 </span>
               </div>
               <span className="font-mono text-xs font-bold opacity-70">Next: {aiCountdown}</span>
