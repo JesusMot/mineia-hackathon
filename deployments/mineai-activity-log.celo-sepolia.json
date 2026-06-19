@@ -1,0 +1,9 @@
+{
+  "contractName": "MineAIActivityLog",
+  "network": "Celo Sepolia",
+  "chainId": 11142220,
+  "contractAddress": "0x795d7be7d4a94c118c9d856a1bfa99740510c4cf",
+  "deploymentTransactionHash": "0x94464a0235304005a976163be2261d1db4623da677854ec14308c0bbdaaa93b0",
+  "deployer": "0xE114D326B6EAFD9456c3B886260C49Fef423D101",
+  "deployedAt": "2026-06-19T16:17:39.731Z"
+}
